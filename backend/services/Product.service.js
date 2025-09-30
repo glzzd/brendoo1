@@ -2,6 +2,7 @@ const Product = require("../models/Product.model");
 const mongoose = require("mongoose");
 const { calculatePriceInRubles } = require('../utils/priceCalculator');
 const { formatPrice } = require('../utils/priceFormatter');
+const { retryOperation } = require('../utils/retryHelper');
 
 // Helper function to normalize size data
 const normalizeSizes = (sizes) => {
@@ -846,10 +847,15 @@ const getAllProductsByStoreService = async (storeName) => {
     // Select only necessary fields for integration
     const selectFields = 'name brand price currency priceInRubles discountedPrice category store images sizes colors productUrl stockStatus createdAt updatedAt';
 
-    const products = await Product.find(query)
-      .select(selectFields)
-      .sort({ createdAt: -1 })
-      .lean();
+    // Wrap the database operation in retry logic
+    const products = await retryOperation(async () => {
+      return await Product.find(query)
+        .select(selectFields)
+        .sort({ createdAt: -1 })
+        .maxTimeMS(120000) // Set query timeout to 2 minutes
+        .lean()
+        .exec();
+    }, 3, 2000); // 3 retries with 2 second initial delay
 
     return {
       success: true,
@@ -860,6 +866,17 @@ const getAllProductsByStoreService = async (storeName) => {
     };
   } catch (error) {
     console.error("❌ Error in getAllProductsByStoreService:", error);
+    
+    // Check if it's a timeout error and provide more specific error message
+    if (error.name === 'MongooseError' && error.message.includes('timed out')) {
+      throw new Error(`Database query timed out for store ${storeName}. The store may have too many products or the database connection is slow.`);
+    }
+    
+    // Check for connection errors
+    if (error.message.includes('connection') && error.message.includes('timed out')) {
+      throw new Error(`Database connection timed out for store ${storeName}. Please check your database connection and try again.`);
+    }
+    
     throw new Error(`Failed to retrieve products for store ${storeName}: ${error.message}`);
   }
 };
